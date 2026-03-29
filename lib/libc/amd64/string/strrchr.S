@@ -1,6 +1,7 @@
 /*-
  * Copyright (c) 2023 The FreeBSD Foundation
  * Copyright (c) 2026 Robert Clausecker <fuz@FreeBSD.org>
+ * Copyright (c) 2026 Isa Isoux <isa@isoux.org>
  *
  * This software was developed by Robert Clausecker <fuz@FreeBSD.org>
  * under sponsorship from the FreeBSD Foundation.
@@ -39,6 +40,7 @@
 ARCHFUNCS(strrchr)
 	ARCHFUNC(strrchr, scalar)
 	ARCHFUNC(strrchr, baseline)
+	ARCHFUNC(strrchr, avx2)
 ENDARCHFUNCS(strrchr)
 
 ARCHENTRY(strrchr, scalar)
@@ -180,4 +182,64 @@ ARCHENTRY(strrchr, baseline)
 	lea		(%r8, %rsi, 1), %rax	# pointer to match
 	ret
 ARCHEND(strrchr, baseline)
+
+ARCHENTRY(strrchr, avx2)
+    mov     %edi, %r8d
+    and     $4095, %r8d     # offset within page
+    cmp     $(4096 - 32), %r8d  # enough space for 32B load?
+    ja      strrchr_baseline    # fallback if near page boundary
+
+    movd        %esi, %xmm0     # load search character
+    vpbroadcastb    %xmm0, %ymm0    # broadcast to all bytes
+    vpxor       %ymm3, %ymm3, %ymm3 # zero vector for NUL detection
+
+    xor     %rax, %rax      # last match pointer (NULL if none)
+
+    /* main loop */
+    ALIGN_TEXT
+0:  vmovdqu     (%rdi), %ymm1
+
+    /* compare for match and NUL */
+    vpcmpeqb    %ymm0, %ymm1, %ymm2 # match mask
+    vpcmpeqb    %ymm3, %ymm1, %ymm4 # NUL mask
+
+    /* detect any interesting byte */
+    vpor        %ymm4, %ymm2, %ymm5
+    vpmovmskb   %ymm5, %edx
+    test        %edx, %edx
+    jz      1f          # no match, no NUL → continue
+
+    /* slow path: extract masks */
+    vpmovmskb   %ymm2, %ecx # match mask
+    vpmovmskb   %ymm4, %edx # NUL mask
+
+    test        %edx, %edx
+    jnz     2f          # NUL present
+
+    /* match only */
+    test        %ecx, %ecx
+    jz      1f
+
+    bsr     %ecx, %ecx  # find last match
+    lea     (%rdi,%rcx,1), %rax
+
+1:  add     $32, %rdi       # advance to next block
+    jmp     0b
+
+2:  # NUL present
+    tzcnt       %edx, %edx      # index of first NUL byte
+
+    mov     $-1, %r8d
+    bzhi        %edx, %r8d, %r8d    # mask of bytes before NUL
+
+    and     %r8d, %ecx      # mask match bits
+    test        %ecx, %ecx
+    jz      3f          # no match before NUL
+
+    bsr     %ecx, %ecx  # last valid match
+    lea     (%rdi,%rcx,1), %rax
+
+3:  vzeroupper
+    ret
+ARCHEND(strrchr, avx2)
 	.section .note.GNU-stack,"",%progbits
