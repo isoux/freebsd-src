@@ -32,214 +32,217 @@
 
 #include "amd64_archlevel.h"
 
-#define ALIGN_TEXT	.p2align 4,0x90	# 16-byte alignment, nop-filled
+#define ALIGN_TEXT  .p2align 4,0x90 # 16-byte alignment, nop-filled
 
-	.weak	rindex
-	.set	rindex, strrchr
+    .weak   rindex
+    .set    rindex, strrchr
 
 ARCHFUNCS(strrchr)
-	ARCHFUNC(strrchr, scalar)
-	ARCHFUNC(strrchr, baseline)
-	ARCHFUNC(strrchr, avx2)
+    ARCHFUNC(strrchr, scalar)
+    ARCHFUNC(strrchr, baseline)
+    ARCHFUNC(strrchr, avx2)
 ENDARCHFUNCS(strrchr)
 
 ARCHENTRY(strrchr, scalar)
-	mov	%edi, %ecx
-	and	$~7, %rdi		# align to 8 byte
-	movzbl	%sil, %esi		# clear stray high bits
-	movabs	$0x0101010101010101, %r8
-	mov	(%rdi), %rax		# load first word
-	imul	%r8, %rsi		# replicate char 8 times
+    mov %edi, %ecx
+    and $~7, %rdi       # align to 8 byte
+    movzbl  %sil, %esi      # clear stray high bits
+    movabs  $0x0101010101010101, %r8
+    mov (%rdi), %rax        # load first word
+    imul    %r8, %rsi       # replicate char 8 times
 
-	/*
-	 * Unaligned input: align to 8 bytes.  Then proceed the same
-	 * way as with aligned input, but prevent matches before the
-	 * beginning of the string.  This is achieved by oring 0x01
-	 * into each byte of the buffer before the string
-	 */
-	shl	$3, %ecx
-	mov	%r8, %r10
-	shl	%cl, %r10		# 0x01 where the string is
-	xor	%r8, %r10		# 0x01 where it is not
-	neg	%r8			# negate 01..01 so we can use lea
-	movabs	$0x8080808080808080, %r9
+    /*
+     * Unaligned input: align to 8 bytes.  Then proceed the same
+     * way as with aligned input, but prevent matches before the
+     * beginning of the string.  This is achieved by oring 0x01
+     * into each byte of the buffer before the string
+     */
+    shl $3, %ecx
+    mov %r8, %r10
+    shl %cl, %r10       # 0x01 where the string is
+    xor %r8, %r10       # 0x01 where it is not
+    neg %r8         # negate 01..01 so we can use lea
+    movabs  $0x8080808080808080, %r9
 
-	mov	%rsi, %rcx
-	xor	%rax, %rcx		# str ^ c
-	or	%r10, %rax		# ensure str != 0 before string
-	or	%r10, %rcx		# ensure str^c != 0 before string
-	xor	%r11, %r11		# vector of last match (0 -> no match)
-	add	$8, %rdi		# advance to next iteration
-	lea	(%rax, %r8, 1), %rdx	# str - 0x01..01
-	not	%rax			# ~str
-	and	%rdx, %rax		# (str - 0x01..01) & ~str
-	and	%r9, %rax		# NUL bytes in str, not including junk bits
-	jnz	2f			# end of string?
-
-	/* main loop */
-	ALIGN_TEXT
-3:	mov	(%rdi), %rax		# str
-	bswap	%rcx			# (str ^ c) in reverse order, to find last match
-	lea	(%rcx, %r8, 1), %rdx	# (str ^ c) - 0x01..01
-	not	%rcx			# ~(str ^ c)
-	and	%rdx, %rcx		# ((str ^ c - 0x01..01) & ~(str ^ c)
-	and	%r9, %rcx		# matches in str, not including junk bits
-	cmovnz	%rdi, %r10		# if match found, update match vector
-	cmovnz	%rcx, %r11		# ... and match pointer
-
-	add	$8, %rdi		# advance to next iteration
-	mov	%rsi, %rcx
-	xor	%rax, %rcx		# str ^ c
-	lea	(%rax, %r8, 1), %rdx	# str - 0x01..01
-	not	%rax			# ~str
-	and	%rdx, %rax		# (str - 0x01..01) & ~str
-	and	%r9, %rax		# NUL bytes in str, not including junk bits
-	jz	3b			# end of string?
-
-	/* NUL found, check for match in tail */
-2:	mov	%rax, %rdx
-	neg	%rax
-	xor	%rdx, %rax		# all bytes behind the NUL byte
-	or	%rax, %rcx		# (str ^ c) without matches behind NUL byte
-	bswap	%rcx			# (src ^ c) in reverse order, to find last match
-	lea	(%rcx, %r8, 1), %rdx	# (str ^ c) - 0x01..01
-	not	%rcx			# ~(str ^ c)
-	and	%rdx, %rcx		# ((str ^ c - 0x01..01) & ~(str ^ c)
-	and	%r9, %rcx		# matches in str, not including junk bits
-	cmovnz	%rdi, %r10		# if match found, update match vector
-	cmovnz	%rcx, %r11		# ... and match pointer
-	tzcnt	%r11, %rcx		# location of last match
-	lea	-1(%r10), %rax		# address of last character in vector
-	shr	$3, %ecx		# as byte offset
-	sub	%rcx, %rax		# subtract character offset
-	test	%r11, %r11		# was there actually a match?
-	cmovz	%r11, %rax		# if not, return null pointer
-	ret
-ARCHEND(strrchr, scalar)
-
-ARCHENTRY(strrchr, baseline)
-	mov		%edi, %ecx
-	and		$~0xf, %rdi		# align to 16 bytes
-	movdqa		(%rdi), %xmm1
-	movd		%esi, %xmm0
-	and		$0xf, %ecx		# offset from alignment
-	pxor		%xmm2, %xmm2
-	mov		$-1, %edx
-	punpcklbw	%xmm0, %xmm0		# c -> cc
-	shl		%cl, %edx		# bits corresponding to bytes in the string
-	punpcklwd	%xmm0, %xmm0		# cc -> cccc
-	xor		%r8, %r8		# address of latest match
-	mov		$1, %esi		# bit mask of latest match
-	mov		%rdi, %r9		# candidate location for next match
-	add		$16, %rdi		# advance to next chunk
-
-	/* check for match in head */
-	pcmpeqb		%xmm1, %xmm2		# NUL byte present?
-	pshufd		$0, %xmm0, %xmm0	# cccc -> cccccccccccccccc
-	pcmpeqb		%xmm0, %xmm1		# c present?
-	pmovmskb	%xmm2, %eax
-	pmovmskb	%xmm1, %ecx
-	and		%edx, %ecx		# c present in the string?
-	and		%edx, %eax		# NUL present in the string?
-	jnz		.Lend2
-
-	/* main loop unrolled twice */
-	ALIGN_TEXT
-0:	movdqa		(%rdi), %xmm1
-	test		%ecx, %ecx		# was there a match in the last iter.?
-	cmovnz		%r9, %r8		# remember match if any
-	cmovnz		%ecx, %esi
-	pxor		%xmm2, %xmm2
-	pcmpeqb		%xmm1, %xmm2		# NUL byte present?
-	pcmpeqb		%xmm0, %xmm1		# c present?
-	pmovmskb	%xmm2, %eax
-	pmovmskb	%xmm1, %ecx
-	test		%eax, %eax		# end of string in first half?
-	jnz		.Lend
-
-	movdqa		16(%rdi), %xmm1
-	test		%ecx, %ecx		# was there a match in the last iter.?
-	cmovnz		%rdi, %r8		# remember match if any
-	cmovnz		%ecx, %esi
-	pxor		%xmm2, %xmm2
-	pcmpeqb		%xmm1, %xmm2		# NUL byte present?
-	pcmpeqb		%xmm0, %xmm1		# c present?
-	pmovmskb	%xmm2, %eax
-	pmovmskb	%xmm1, %ecx
-	lea		16(%rdi), %r9
-	add		$32, %rdi
-	test		%eax, %eax		# end of string in second half?
-	jz		0b
-
-	ALIGN_TEXT
-.Lend2:	sub		$16, %rdi
-.Lend:	lea 		-1(%rax), %edx
-	xor		%edx, %eax		# mask of bytes in the string
-	and		%eax, %ecx		# c found in the tail?
-	cmovnz		%rdi, %r8
-	cmovnz		%ecx, %esi
-	bsr		%esi, %esi		# last location of c in (R8)
-	lea		(%r8, %rsi, 1), %rax	# pointer to match
-	ret
-ARCHEND(strrchr, baseline)
-
-ARCHENTRY(strrchr, avx2)
-    mov     %edi, %r8d
-    and     $4095, %r8d     # offset within page
-    cmp     $(4096 - 32), %r8d  # enough space for 32B load?
-    ja      strrchr_baseline    # fallback if near page boundary
-
-    movd        %esi, %xmm0     # load search character
-    vpbroadcastb    %xmm0, %ymm0    # broadcast to all bytes
-    vpxor       %ymm3, %ymm3, %ymm3 # zero vector for NUL detection
-
-    xor     %rax, %rax      # last match pointer (NULL if none)
+    mov %rsi, %rcx
+    xor %rax, %rcx      # str ^ c
+    or  %r10, %rax      # ensure str != 0 before string
+    or  %r10, %rcx      # ensure str^c != 0 before string
+    xor %r11, %r11      # vector of last match (0 -> no match)
+    add $8, %rdi        # advance to next iteration
+    lea (%rax, %r8, 1), %rdx    # str - 0x01..01
+    not %rax            # ~str
+    and %rdx, %rax      # (str - 0x01..01) & ~str
+    and %r9, %rax       # NUL bytes in str, not including junk bits
+    jnz 2f          # end of string?
 
     /* main loop */
     ALIGN_TEXT
+3:  mov (%rdi), %rax        # str
+    bswap   %rcx            # (str ^ c) in reverse order, to find last match
+    lea (%rcx, %r8, 1), %rdx    # (str ^ c) - 0x01..01
+    not %rcx            # ~(str ^ c)
+    and %rdx, %rcx      # ((str ^ c - 0x01..01) & ~(str ^ c)
+    and %r9, %rcx       # matches in str, not including junk bits
+    cmovnz  %rdi, %r10      # if match found, update match vector
+    cmovnz  %rcx, %r11      # ... and match pointer
+
+    add $8, %rdi        # advance to next iteration
+    mov %rsi, %rcx
+    xor %rax, %rcx      # str ^ c
+    lea (%rax, %r8, 1), %rdx    # str - 0x01..01
+    not %rax            # ~str
+    and %rdx, %rax      # (str - 0x01..01) & ~str
+    and %r9, %rax       # NUL bytes in str, not including junk bits
+    jz  3b          # end of string?
+
+    /* NUL found, check for match in tail */
+2:  mov %rax, %rdx
+    neg %rax
+    xor %rdx, %rax      # all bytes behind the NUL byte
+    or  %rax, %rcx      # (str ^ c) without matches behind NUL byte
+    bswap   %rcx            # (src ^ c) in reverse order, to find last match
+    lea (%rcx, %r8, 1), %rdx    # (str ^ c) - 0x01..01
+    not %rcx            # ~(str ^ c)
+    and %rdx, %rcx      # ((str ^ c - 0x01..01) & ~(str ^ c)
+    and %r9, %rcx       # matches in str, not including junk bits
+    cmovnz  %rdi, %r10      # if match found, update match vector
+    cmovnz  %rcx, %r11      # ... and match pointer
+    tzcnt   %r11, %rcx      # location of last match
+    lea -1(%r10), %rax      # address of last character in vector
+    shr $3, %ecx        # as byte offset
+    sub %rcx, %rax      # subtract character offset
+    test    %r11, %r11      # was there actually a match?
+    cmovz   %r11, %rax      # if not, return null pointer
+    ret
+ARCHEND(strrchr, scalar)
+
+ARCHENTRY(strrchr, baseline)
+    mov     %edi, %ecx
+    and     $~0xf, %rdi     # align to 16 bytes
+    movdqa      (%rdi), %xmm1
+    movd        %esi, %xmm0
+    and     $0xf, %ecx      # offset from alignment
+    pxor        %xmm2, %xmm2
+    mov     $-1, %edx
+    punpcklbw   %xmm0, %xmm0        # c -> cc
+    shl     %cl, %edx       # bits corresponding to bytes in the string
+    punpcklwd   %xmm0, %xmm0        # cc -> cccc
+    xor     %r8, %r8        # address of latest match
+    mov     $1, %esi        # bit mask of latest match
+    mov     %rdi, %r9       # candidate location for next match
+    add     $16, %rdi       # advance to next chunk
+
+    /* check for match in head */
+    pcmpeqb     %xmm1, %xmm2        # NUL byte present?
+    pshufd      $0, %xmm0, %xmm0    # cccc -> cccccccccccccccc
+    pcmpeqb     %xmm0, %xmm1        # c present?
+    pmovmskb    %xmm2, %eax
+    pmovmskb    %xmm1, %ecx
+    and     %edx, %ecx      # c present in the string?
+    and     %edx, %eax      # NUL present in the string?
+    jnz     .Lend2
+
+    /* main loop unrolled twice */
+    ALIGN_TEXT
+0:  movdqa      (%rdi), %xmm1
+    test        %ecx, %ecx      # was there a match in the last iter.?
+    cmovnz      %r9, %r8        # remember match if any
+    cmovnz      %ecx, %esi
+    pxor        %xmm2, %xmm2
+    pcmpeqb     %xmm1, %xmm2        # NUL byte present?
+    pcmpeqb     %xmm0, %xmm1        # c present?
+    pmovmskb    %xmm2, %eax
+    pmovmskb    %xmm1, %ecx
+    test        %eax, %eax      # end of string in first half?
+    jnz     .Lend
+
+    movdqa      16(%rdi), %xmm1
+    test        %ecx, %ecx      # was there a match in the last iter.?
+    cmovnz      %rdi, %r8       # remember match if any
+    cmovnz      %ecx, %esi
+    pxor        %xmm2, %xmm2
+    pcmpeqb     %xmm1, %xmm2        # NUL byte present?
+    pcmpeqb     %xmm0, %xmm1        # c present?
+    pmovmskb    %xmm2, %eax
+    pmovmskb    %xmm1, %ecx
+    lea     16(%rdi), %r9
+    add     $32, %rdi
+    test        %eax, %eax      # end of string in second half?
+    jz      0b
+
+    ALIGN_TEXT
+.Lend2: sub     $16, %rdi
+.Lend:  lea         -1(%rax), %edx
+    xor     %edx, %eax      # mask of bytes in the string
+    and     %eax, %ecx      # c found in the tail?
+    cmovnz      %rdi, %r8
+    cmovnz      %ecx, %esi
+    bsr     %esi, %esi      # last location of c in (R8)
+    lea     (%r8, %rsi, 1), %rax    # pointer to match
+    ret
+ARCHEND(strrchr, baseline)
+
+ARCHENTRY(strrchr, avx2)
+    mov     %edi, %ecx
+    and     $~0x1f, %rdi        # align to 32 bytes
+    vmovdqu     (%rdi), %ymm1
+    and     $0x1f, %ecx     # offset from alignment
+    vpxor       %ymm2, %ymm2, %ymm2
+    mov     $-1, %edx
+    movd        %esi, %xmm0     # load char
+    vpbroadcastb    %xmm0, %ymm0    # broadcast to 32 bytes
+    shl     %cl, %edx       # bits corresponding to bytes in the string
+    xor     %r8, %r8        # address of latest match
+    mov     $1, %esi        # bit mask of latest match
+    mov     %rdi, %r9       # candidate location for next match
+    add     $32, %rdi       # advance to next chunk
+
+    /* check for match in head */
+    vpcmpeqb        %ymm2, %ymm1, %ymm2     # NUL byte present?
+    vpcmpeqb        %ymm1, %ymm0, %ymm1     # c present?
+    vpmovmskb   %ymm2, %eax
+    vpmovmskb   %ymm1, %ecx
+    and     %edx, %ecx      # c present in the string?
+    and     %edx, %eax      # NUL present in the string?
+    jnz     .Lend2_avx2
+
+    /* main loop unrolled twice */
+    ALIGN_TEXT
 0:  vmovdqu     (%rdi), %ymm1
+    test        %ecx, %ecx      # was there a match in the last iter.?
+    cmovnz      %r9, %r8        # remember match if any
+    cmovnz      %ecx, %esi
+    vpcmpeqb        %ymm2, %ymm1, %ymm2     # NUL byte present?
+    vpcmpeqb        %ymm1, %ymm0, %ymm1     # c present?
+    vpmovmskb   %ymm2, %eax
+    vpmovmskb   %ymm1, %ecx
+    test        %eax, %eax      # end of string in first half?
+    jnz     .Lend_avx2
 
-    /* compare for match and NUL */
-    vpcmpeqb    %ymm0, %ymm1, %ymm2 # match mask
-    vpcmpeqb    %ymm3, %ymm1, %ymm4 # NUL mask
+    vmovdqu     32(%rdi), %ymm1
+    test        %ecx, %ecx      # was there a match in the last iter.?
+    cmovnz      %rdi, %r8       # remember match if any
+    cmovnz      %ecx, %esi
+    vpcmpeqb        %ymm2, %ymm1, %ymm2     # NUL byte present?
+    vpcmpeqb        %ymm1, %ymm0, %ymm1     # c present?
+    vpmovmskb   %ymm2, %eax
+    vpmovmskb   %ymm1, %ecx
+    lea     32(%rdi), %r9
+    add     $32, %rdi
+    test        %eax, %eax      # end of string in second half?
+    jz      0b
 
-    /* detect any interesting byte */
-    vpor        %ymm4, %ymm2, %ymm5
-    vpmovmskb   %ymm5, %edx
-    test        %edx, %edx
-    jz      1f          # no match, no NUL → continue
-
-    /* slow path: extract masks */
-    vpmovmskb   %ymm2, %ecx # match mask
-    vpmovmskb   %ymm4, %edx # NUL mask
-
-    test        %edx, %edx
-    jnz     2f          # NUL present
-
-    /* match only */
-    test        %ecx, %ecx
-    jz      1f
-
-    bsr     %ecx, %ecx  # find last match
-    lea     (%rdi,%rcx,1), %rax
-
-1:  add     $32, %rdi       # advance to next block
-    jmp     0b
-
-2:  # NUL present
-    tzcnt       %edx, %edx      # index of first NUL byte
-
-    mov     $-1, %r8d
-    bzhi        %edx, %r8d, %r8d    # mask of bytes before NUL
-
-    and     %r8d, %ecx      # mask match bits
-    test        %ecx, %ecx
-    jz      3f          # no match before NUL
-
-    bsr     %ecx, %ecx  # last valid match
-    lea     (%rdi,%rcx,1), %rax
-
-3:  vzeroupper
+    ALIGN_TEXT
+.Lend2_avx2:    sub     $32, %rdi
+.Lend_avx2: lea     -1(%rax), %edx
+    xor     %edx, %eax      # mask of bytes in the string
+    and     %eax, %ecx      # c found in the tail?
+    cmovnz      %rdi, %r8
+    cmovnz      %ecx, %esi
+    bsr     %esi, %esi      # last location of c in (R8)
+    lea     (%r8, %rsi, 1), %rax    # pointer to match
+    vzeroupper
     ret
 ARCHEND(strrchr, avx2)
-	.section .note.GNU-stack,"",%progbits
+    .section .note.GNU-stack,"",%progbits
